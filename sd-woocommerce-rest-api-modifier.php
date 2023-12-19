@@ -208,15 +208,167 @@ function sd_register_custom_rest_apis(){
     'callback' => 'sd_customized_orders_for_tally'
   ]);
 
+  register_rest_route('wc/v3/', 'sd_orders', [
+    'methods'  => 'POST',
+    'callback' => 'sd_get_receipt_data_for_tally'
+  ]);
+
   register_rest_route('wc/v3/', 'create_pr_logs', [
     'methods'  => 'POST',
     'callback' => 'sd_create_pr_logs'
   ]);
+
+  register_rest_route('wc/v3/', 'eaaca_jv', [
+    'methods'  => 'GET',
+    'callback' => 'sd_send_jv_data_to_tally'
+  ]);
+
+  register_rest_route('wc/v3/', 'eaaca_jv', [
+    'methods'  => 'POST',
+    'callback' => 'sd_get_jv_data_from_tally'
+  ]);
+
+  
+}
+
+function generate_log( $log ){
+    $log .= print_r($log, true);
+    //$log .= "---------------------------------------------------\n\n";
+    file_put_contents( SD_WRAM_DIR.'/debug.txt', $log, FILE_APPEND );
+}
+
+
+function sd_get_jv_data_from_tally(){
+    $post_data = json_decode(file_get_contents('php://input'));
+    generate_log( "JV posted data" );
+    generate_log( $post_data );
+    return true;
+}
+
+function sd_send_jv_data_to_tally($data){
+    $request_params = $data->get_params();
+    $query_string   = http_build_query($request_params);
+    $apibase        = home_url('/wp-json/wc/v3/orders');
+    $endpoint       = $apibase.'?'.$query_string.'&_fields=id';
+
+    // $app_user = isset($request_params['username']) ? $request_params['username'] : '';
+    // $app_pass = isset($request_params['password']) ? $request_params['password'] : '';
+
+    $args = array();
+    if($app_user && $app_pass){
+      $args['headers'] = array(
+       'Authorization' => 'Basic ' . base64_encode( $app_user . ':' . $app_pass ),
+      );
+    }
+
+    // $args['timeout'] = 120;
+    $response = wp_remote_get( $endpoint, $args);
+
+    $response_code = wp_remote_retrieve_response_code( $response );
+    $response_body = wp_remote_retrieve_body( $response );
+
+    $response_data = json_decode($response_body, true);
+
+    $jv_data   = array();
+    $jv_data[] = array(
+                        "VchNo"     => "VchNo Number",
+                        "date"      => "11-09-2023",
+                        "narration" => "Test 2",
+                        "Dr_Ledger" => array(
+                                          array(
+                                            "LedgerName"        => "Ledger Name", //Customer Name
+                                            "Amount"            => "5000",
+                                          ),
+                                      ),
+                        "Cr_Ledger" => array(
+                                            array(
+                                                "LedgerName"    => "SA tax", //Type from Expenses
+                                                "Amount"        => "5000",
+
+                                                )     
+                                    ),
+                    );
+              
+    $response_data = json_decode($jv_data);
+    return $response_data;
+}
+
+/*
+    POST REQUEST FROM TALLY FOR RECEIPTS
+*/
+function sd_get_receipt_data_for_tally(){
+   $php_input = file_get_contents('php://input');
+    
+   generate_log( "SD GET RECEIPT DATA FOR TALLY" );
+   generate_log( $php_input );
+   $post_data = json_decode($php_input);
+
+    // generate_log( $post_data );
+    if(isset($post_data->log) && !empty($post_data->log)){
+        $totalcount = count($post_data->log);
+        $success_count = 0;
+        $failed_count  = 0;
+        foreach ($post_data->log as $object) {
+            $import_date            = isset($object->import_date) ? $object->import_date : '';
+            $tally_user_name        = isset($object->tally_user_name) ? $object->tally_user_name : '';
+            $tally_company_name     = isset($object->tally_company_name) ? $object->tally_company_name : '';
+            $tally_ref_id           = isset($object->tally_ref_id) ? $object->tally_ref_id : '';
+            $ordernumber            = isset($object->ordernumber) ? $object->ordernumber : '';
+            $amount                 = isset($object->amount) ? $object->amount : '';
+            $dr_ledger              = isset($object->dr_ledger) ? $object->dr_ledger : '';
+            $cr_ledger              = isset($object->cr_ledger) ? $object->cr_ledger : '';
+            $description            = isset($object->description) ? $object->description : '';
+            $status                 = isset($object->status) ? $object->status : '';
+            $order_id               = $ordernumber;
+
+            if($ordernumber && wc_get_order($ordernumber)){
+                    $tally_import_history = get_post_meta($ordernumber, 'tally_import_pr_history', true) ? get_post_meta($ordernumber, 'tally_import_pr_history', true) : null;
+                    $log_data = array(
+                      'import_date'         => $import_date,
+                      'tally_user_name'     => $tally_user_name,
+                      'tally_company_name'  => $tally_company_name,
+                      'tally_ref_id'        => $tally_ref_id,
+                      'ordernumber'         => $ordernumber,
+                      'amount'              => $amount,
+                      'dr_ledger'           => $dr_ledger,
+                      'cr_ledger'           => $cr_ledger,
+                      'description'         => $description
+                    );
+                    $tally_import_history_array = array();
+                    if($tally_import_history){
+                        $tally_import_history_array = json_decode($tally_import_history, true);
+                    }
+                    if(!sd_check_same_log_created($tally_import_history_array, $log_data)){
+                        $tally_import_history_array[] = $log_data;
+                    }
+
+                    update_post_meta($order_id, 'tally_import_pr_history', json_encode($tally_import_history_array));
+                    $success_count++;
+                  }else{
+                    $failed_count++;
+                  }
+        }
+
+        /*
+            CHECKMARK LOGIC
+            UNCHECK THE Rcpt Import To Tally and add Timestamp
+        */
+        return array(
+          'status'          => $success_count ? 'success' : 'error',
+          'orders'          => $success_count ? 'updated' : 'no orders found',
+          'totalcount'      => $totalcount,
+          'success_count'   => $success_count,
+          'failed_count'    => $failed_count
+        );
+  }
 }
 
 function sd_tally_imported_orders($data){
+   $php_input = file_get_contents('php://input');
+   generate_log( "SD TALLY IMPORTED ORDERS" );
+   generate_log( $php_input );
 
-  $post_data = json_decode(file_get_contents('php://input'));
+  $post_data = json_decode($php_input);
 
   if(isset($post_data->log) && !empty($post_data->log)){
     $totalcount = count($post_data->log);
